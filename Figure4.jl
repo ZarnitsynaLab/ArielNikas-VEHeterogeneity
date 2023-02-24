@@ -5,7 +5,7 @@ using DataFrames, Random, CSV, Distributions, Distributed, Plots, RCall
 
 function namedfile1(df,namefile)
 
-    work_dir="//Users//nikas//Desktop//Example-RiskCorrelate-" #This is where the files will save out, change if on a different computer
+    work_dir="Example-RiskCorrelate-" #This is where the files will save out, change if on a different computer
     name = work_dir*namefile
     CSV.write(name,df)
 end
