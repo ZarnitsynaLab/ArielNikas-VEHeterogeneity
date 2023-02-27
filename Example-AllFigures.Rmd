@@ -1,0 +1,443 @@
+---
+title: "Competing Heterogeneities in Vaccine Efficacy Estimation: Create Example Figures"
+author: "Ariel Nikas"
+date: "2/27/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## This code is intended to go along with the paper "Competing Heterogeneities in Vaccine Efficacy Estimation" and provides example code for the figures or, for compound figures, a single panel. Note that this reads in csv files generated from Julia which should also be in the code repository named by figure number (i.e. Figure1.jl makes Figure 1's panels) and due to the stochastic nature of the models may vary somewhat (though does not alter results) between computers and versions. 
+
+```{r}
+#Load In Packages
+  library("survminer")  
+  library("survival") 
+```
+
+
+#--Generate Figure 1: Heterogeneity in Underlying Susceptibility ONLY (VE is at 50%)
+```{r}
+ #--Here we: 1) reorganize the read in data, 2) create our bins and solve the Cox model, 3) solve for the TVI method (biggest time), 4) plot all panels
+Scenario=read.csv("~/Desktop/ExampleFigure1-1.csv")
+originalVE<-rep(50,365)
+
+#Parameters
+spread=1 #How many days is vaccination spread over?
+mindays=14 #Minimum number of days in bin (the smaller this is the longer it takes to run)
+minevents=100 #Minimum number of events in bin (<100 is generally a bad estimate)
+D=365 #How many days in the simulation?
+an=Scenario3=Scenario #re-name for reorganization
+
+##---------------------------------------------First: Reorganize Data
+an$vac_status2=an$original_infectors=NULL 
+x1=subset(an,vac_status==0)
+x1$time1=1; x1$time2=x1$infected_time+0.5; x1$event=x1$ever_infected; x1$vac=0
+if( length(which(an$vac_status==1&an$vac_time>1))>=1){
+x2=subset(an,vac_status==1&vac_time>1)
+x2$time1=1; x2$time2=x2$vac_time; x2$event=0; x2$vac=0
+}
+x3=subset(an,vac_status==1)
+x3$time1=x3$vac_time; x3$time2=x3$infected_time+0.5; x3$event=x3$ever_infected; x3$vac=1
+if(length(which(an$vac_status==1&an$vac_time>1))>=1){
+x=rbind(x1,x2,x3)}else{x=rbind(x1,x3)}
+x=x[order(x$id,x$time1),]
+x$time3=1; x$time4=x$time2-x$time1+1
+x$vac_status=x$ever_infected=x$infected_time=x$vac_time=NULL #x is dataset rearranged to work with coxph
+
+##---------------------------------------------Second: Make Bins and Solve Cox Model
+fit=coxph(Surv(time1,time2,event)~vac,x)
+zph=cox.zph(fit,'identity')
+ut=c(unique(zph$x),Inf); LL=ut[1]; i=1; j=length(ut); mind=mindays; minn=minevents
+while(TRUE){
+ if(ut[j]-ut[i]<mind|sum(ut[i]<=zph$x)<minn){LL[length(LL)]=Inf; break}
+ for(newi in i:j) if(ut[newi]-ut[i]>=mind&sum(ut[i]<=zph$x&zph$x<ut[newi])>=minn) break
+ i=newi; LL=c(LL,ut[newi])
+}
+bins=cut(zph$x,LL,FALSE,right=FALSE); nbins=length(LL)-1
+day<-tapply(zph$x,bins,mean); event.level3.SR<-(1-exp(tapply(zph$y,bins,mean)))*100 
+
+
+##---------------------------------------------Third: Solve For TVI Method
+ru=residuals(fit,'schoenfeld') #unscaled schoenfeld residuals
+tk=as.numeric(names(ru)); Bm=coef(fit); rh=exp(Bm); V=(ru>0)+0 #tk is infection times, V indicates whether infected was vaccinated (0=unvaccinated, 1=vaccinated)
+Z=sapply(unique(rank(tk,ties.method='min')),function(i) optimize(function(Z) (V[i]-exp(Bm)*Z/(exp(Bm)*Z+1-Z) - ru[i])^2 ,c(0,1),tol=1e-15)$min )
+Z=Z[as.numeric(factor(tk))]
+y=survSplit(Surv(time1,time2,event)~.,x,cut=tapply(zph$x,bins,max)[-nbins],zero=1,episode='tcat') 
+vzm=sapply(1:nbins,function(i) coxph(Surv(time1,time2,event)~vac,subset(y,tcat==i))$coef[[1]] ) 
+fit2=coxph(Surv(time1,time2,event)~vac:factor(tcat),y)
+TVI<-exp(coef(fit2))#hazard ratio estimates using time vaccine interaction term
+bins=as.numeric(factor(bins))
+event.level3.TVI<-(1-TVI)*100 #actual mVE from this method
+
+
+##---------------------------------------------Fourth: Plot
+
+#For Panel A: Histogram of Underlying Chance to Get Infected
+who.u1<-which(Scenario$vac_status==0)
+dist.u1<-Scenario$RR[who.u1]
+who.v1<-which(Scenario$vac_status==1)
+dist.v1<-Scenario$RR[who.v1]#*0.5
+
+pdf(file = "~/Desktop/ExampleFigure1A.pdf", width = 6, height =4.75 ) 
+par(mfrow=c(1,1))
+hist(dist.u1, main="Initial Underlying Risk", col="steelblue", xlab="Chance to Get Infected", xlim=c(0, 0.04), ylim=c(0,50000), breaks =40)
+hist(dist.v1, add=TRUE, col="purple", breaks=40)
+legend("topright", legend=c("Vaccinated", "Unvaccinated"), col=c("purple", "steelblue"), lty=1, lwd=4, bty="n")
+dev.off()
+
+
+#For Panel B: Fraction of Individuals who are Still Susceptible in Each Group
+infvax<-infunv<-rep(NA,365)
+for(k in 1:364){
+  infvax[k]<-length(which(Scenario$infected_time>k & Scenario$vac_status==1))
+    infunv[k]<-length(which(Scenario$infected_time>k & Scenario$vac_status==0)) 
+}
+
+pdf(file = "~/Desktop/ExampleFigure1B.pdf", width = 6, height =4.75 ) 
+par(mfrow=c(1,1))
+plot(seq(1:365), infunv/100000, type="l", col="steelblue", ylab="Fraction Susceptible", xlab="Day of Epidemic", cex.lab=1.4, cex.main=1.5, cex.axis=1.4, ylim=c(0.2,0.7), lwd=2)
+lines(seq(1:365), infvax/100000, col="purple", lwd=2)
+legend("topright", legend=c("Vaccinated", "Unvaccinated"), col=c("purple", "steelblue"), lty=1, bty="n", lwd=2)
+dev.off()
+
+#For Panel C: mVE compared to VE_NE
+pdf(file = "~/Desktop/ExampleFigure1C.pdf", width = 6, height =4.75 ) 
+par(mfrow=c(1,1))
+plot(seq(1:365), originalVE, lwd=2, col="black", main="Gamma(0.2,80)", ylab="VE %", xlab="Day of Epidemic", type="l", ylim=c(0,60))
+lines(day, event.level3.TVI, col="forestgreen", lwd=2, type="b")
+legend("topright", legend=c("VE", "mVE (TVI)"), col=c("black", "forestgreen"), lwd=2, lty=c(1,1,2,2,2),bty="n")
+dev.off()
+```
+
+
+#--Generate Figure 2: Heterogeneity in Vaccine-Induced Protection (mean = 0.5) ONLY
+```{r}
+ #--Here we: 1) reorganize the read in data, 2) create our bins and solve for the SR method, 3) solve for the TVI method (biggest time), 4) plot all panels
+Scenario=read.csv("~/Desktop/ExampleFigure2-1.csv")
+originalVE<-rep(50,365)
+
+#Parameters
+spread=1 #How many days is vaccination spread over?
+mindays=14 #Minimum number of days in bin (the smaller this is the longer it takes to run)
+minevents=100 #Minimum number of events in bin (<100 is generally a bad estimate)
+D=365 #How many days in the simulation?
+an=Scenario3=Scenario #re-name for reorganization
+
+##---------------------------------------------First: Reorganize Data
+an$vac_status2=an$original_infectors=NULL
+x1=subset(an,vac_status==0)
+x1$time1=1; x1$time2=x1$infected_time+0.5; x1$event=x1$ever_infected; x1$vac=0
+if( length(which(an$vac_status==1&an$vac_time>1))>=1){
+x2=subset(an,vac_status==1&vac_time>1)
+x2$time1=1; x2$time2=x2$vac_time; x2$event=0; x2$vac=0
+}
+x3=subset(an,vac_status==1)
+x3$time1=x3$vac_time; x3$time2=x3$infected_time+0.5; x3$event=x3$ever_infected; x3$vac=1
+if(length(which(an$vac_status==1&an$vac_time>1))>=1){
+x=rbind(x1,x2,x3)}else{x=rbind(x1,x3)}
+x=x[order(x$id,x$time1),]
+x$time3=1; x$time4=x$time2-x$time1+1
+x$vac_status=x$ever_infected=x$infected_time=x$vac_time=NULL #x is dataset rearranged to work with coxph
+
+##---------------------------------------------Second: Make Bins and Solve the Cox Model
+fit=coxph(Surv(time1,time2,event)~vac,x)
+zph=cox.zph(fit,'identity')
+ut=c(unique(zph$x),Inf); LL=ut[1]; i=1; j=length(ut); mind=mindays; minn=minevents
+while(TRUE){
+ if(ut[j]-ut[i]<mind|sum(ut[i]<=zph$x)<minn){LL[length(LL)]=Inf; break}
+ for(newi in i:j) if(ut[newi]-ut[i]>=mind&sum(ut[i]<=zph$x&zph$x<ut[newi])>=minn) break
+ i=newi; LL=c(LL,ut[newi])
+}
+bins=cut(zph$x,LL,FALSE,right=FALSE); nbins=length(LL)-1
+day<-tapply(zph$x,bins,mean); event.level3.SR<-(1-exp(tapply(zph$y,bins,mean)))*100
+
+
+##---------------------------------------------Third: Solve For TVI Method
+ru=residuals(fit,'schoenfeld') #unscaled schoenfeld residuals
+tk=as.numeric(names(ru)); Bm=coef(fit); rh=exp(Bm); V=(ru>0)+0 #tk is infection times, V indicates whether infected was vaccinated (0=unvaccinated, 1=vaccinated)
+Z=sapply(unique(rank(tk,ties.method='min')),function(i) optimize(function(Z) (V[i]-exp(Bm)*Z/(exp(Bm)*Z+1-Z) - ru[i])^2 ,c(0,1),tol=1e-15)$min )
+Z=Z[as.numeric(factor(tk))]
+y=survSplit(Surv(time1,time2,event)~.,x,cut=tapply(zph$x,bins,max)[-nbins],zero=1,episode='tcat') 
+vzm=sapply(1:nbins,function(i) coxph(Surv(time1,time2,event)~vac,subset(y,tcat==i))$coef[[1]] ) 
+fit2=coxph(Surv(time1,time2,event)~vac:factor(tcat),y)
+TVI<-exp(coef(fit2))#hazard ratio estimates using time vaccine interaction term
+bins=as.numeric(factor(bins))
+event.level3.TVI<-(1-TVI)*100 #This is mVE
+
+
+##---------------------------------------------Fourth: Plot
+
+#For Panel A: Vaccine Protection Histogram
+who.u1<-which(Scenario$vac_status==0)
+dist.u1<-Scenario$RR[who.u1]
+who.v1<-which(Scenario$vac_status==1)
+dist.v1<-Scenario$RR[who.v1]#*0.5
+pdf(file = "~/Desktop/ExampleFigure2A.pdf", width = 6, height =4.75 ) 
+par(mfrow=c(1,1))
+hist(Scenario$RRVE, main="", col="purple", xlab="Vaccine Protection", ylim=c(0,15000))
+dev.off()
+
+
+#For Panel B: Fraction Susceptible in Each Group
+infvax<-infunv<-rep(NA,365)
+for(k in 1:364){
+  infvax[k]<-length(which(Scenario$infected_time>k & Scenario$vac_status==1))
+    infunv[k]<-length(which(Scenario$infected_time>k & Scenario$vac_status==0)) 
+}
+
+pdf(file = "~/Desktop/ExampleFigure2B.pdf", width = 6, height =4.75 ) 
+par(mfrow=c(1,1))
+plot(seq(1:365), infunv/100000, type="l", col="steelblue", ylab="Fraction Susceptible", xlab="Day of Epidemic", cex.lab=1.4, cex.main=1.5, cex.axis=1.4, ylim=c(0.2,0.7), lwd=2)
+lines(seq(1:365), infvax/100000, col="purple", lwd=2)
+legend("topright", legend=c("Vaccinated", "Unvaccinated"), col=c("purple", "steelblue"), lty=1, bty="n", lwd=2)
+dev.off()
+
+
+#For Panel C: mVE vs. VE_NE (50%)
+pdf(file = "~/Desktop/ExampleFigure2C.pdf", width = 6, height =4.75 ) 
+par(mfrow=c(1,1))
+plot(seq(1:365), originalVE, lwd=2, col="black", main="Beta(2,2)", ylab="VE %", xlab="Day of Epidemic", type="l", ylim=c(40,100))
+lines(day, event.level3.TVI, col="forestgreen", lwd=2, type="b")
+legend("topright", legend=c("VE", "mVE (TVI)"), col=c("black", "forestgreen"), lwd=2, lty=c(1,1,2,2,2),bty="n")
+dev.off()
+```
+
+#--Generate Figure 3 Panels: Heterogeneity in Susceptibility and Vaccine-Induced Protection + Predictor 
+```{r}
+#--This makes an example (Panel C) from Figure 3
+Scenario=read.csv("~/Desktop/ExampleFigure3-PanelC-1.csv")
+originalVE<-rep(50,365)
+
+##--Finding the Prediction Amount Over Time
+predictor.1<-rep(NA,365) 
+for (k in 1:364){ #Due to right censoring on day 365, only predict on days 1-364
+rvax<-which(Scenario$vac_status==1 &Scenario$infected_time>k)
+runv<-which(Scenario$vac_status==0&Scenario$infected_time>k)
+muU<-mean(Scenario$RR[runv]) #mean frailty in unvaccinated
+muV<-mean(Scenario$RR[rvax]*(1-Scenario$RRVE[rvax])) #mean frailty in vaccinated (both protection and susceptibility)
+varU<-var(Scenario$RR[runv]) #variance of frailty in unvaccinated
+varV<-var(Scenario$RR[rvax]*(1-Scenario$RRVE[rvax])) #variance of frailty in vaccinated (both protection and susceptibility)
+predictor.1[k]<-(-varV*muU+muV*varU)/muU^2}
+
+#Parameters
+spread=1 #How many days is vaccination spread over?
+mindays=14 #Minimum number of days in bin (the smaller this is the longer it takes to run)
+minevents=100 #Minimum number of events in bin (<100 is generally a bad estimate)
+D=365 #How many days in the simulation?
+an=Scenario3=Scenario #re-name for reorganization
+
+##---------------------------------------------First: Reorganize Data
+an$vac_status2=an$original_infectors=NULL
+x1=subset(an,vac_status==0)
+x1$time1=1; x1$time2=x1$infected_time+0.5; x1$event=x1$ever_infected; x1$vac=0
+if( length(which(an$vac_status==1&an$vac_time>1))>=1){
+x2=subset(an,vac_status==1&vac_time>1)
+x2$time1=1; x2$time2=x2$vac_time; x2$event=0; x2$vac=0
+}
+x3=subset(an,vac_status==1)
+x3$time1=x3$vac_time; x3$time2=x3$infected_time+0.5; x3$event=x3$ever_infected; x3$vac=1
+if(length(which(an$vac_status==1&an$vac_time>1))>=1){
+x=rbind(x1,x2,x3)}else{x=rbind(x1,x3)} 
+x=x[order(x$id,x$time1),]
+x$time3=1; x$time4=x$time2-x$time1+1
+x$vac_status=x$ever_infected=x$infected_time=x$vac_time=NULL #x is dataset rearranged to work with coxph
+
+##---------------------------------------------Second: Make Bins and Solve the Cox Model 
+fit=coxph(Surv(time1,time2,event)~vac,x)
+zph=cox.zph(fit,'identity')
+ut=c(unique(zph$x),Inf); LL=ut[1]; i=1; j=length(ut); mind=mindays; minn=minevents
+while(TRUE){
+ if(ut[j]-ut[i]<mind|sum(ut[i]<=zph$x)<minn){LL[length(LL)]=Inf; break}
+ for(newi in i:j) if(ut[newi]-ut[i]>=mind&sum(ut[i]<=zph$x&zph$x<ut[newi])>=minn) break
+ i=newi; LL=c(LL,ut[newi])
+}
+bins=cut(zph$x,LL,FALSE,right=FALSE); nbins=length(LL)-1
+day<-tapply(zph$x,bins,mean); event.level3.SR<-(1-exp(tapply(zph$y,bins,mean)))*100
+
+
+##---------------------------------------------Third: Solve For Level 3 TVI Method
+ru=residuals(fit,'schoenfeld') #unscaled schoenfeld residuals
+tk=as.numeric(names(ru)); Bm=coef(fit); rh=exp(Bm); V=(ru>0)+0 #tk is infection times, V indicates whether infected was vaccinated (0=unvaccinated, 1=vaccinated)
+Z=sapply(unique(rank(tk,ties.method='min')),function(i) optimize(function(Z) (V[i]-exp(Bm)*Z/(exp(Bm)*Z+1-Z) - ru[i])^2 ,c(0,1),tol=1e-15)$min )
+Z=Z[as.numeric(factor(tk))]
+y=survSplit(Surv(time1,time2,event)~.,x,cut=tapply(zph$x,bins,max)[-nbins],zero=1,episode='tcat') 
+vzm=sapply(1:nbins,function(i) coxph(Surv(time1,time2,event)~vac,subset(y,tcat==i))$coef[[1]] ) 
+fit2=coxph(Surv(time1,time2,event)~vac:factor(tcat),y)
+TVI<-exp(coef(fit2))#hazard ratio estimates using time vaccine interaction term
+bins=as.numeric(factor(bins))
+
+event.level3.TVI<-(1-TVI)*100
+
+##---------------------------------------------Fourth: Create Original and Predicted Lines 
+originalVE=rep( mean(Scenario$RRVE),365)*100
+prediction=rep(NA,364)
+for(i in 1:364){
+  prediction[i]<-(mean(Scenario$RRVE))-(sum(predictor.1[1:i]))
+}
+
+##---------------------------------------------Fifth: Plot
+pdf(file = "~/Desktop/ExampleFigure3C.pdf", width = 6, height =4.75 ) 
+par(mfrow=c(1,1))
+plot(seq(1:365), originalVE, lwd=2, col="black", main="Gamma(2,800), Beta(0.2,0.2)", ylab="VE %", xlab="Day of Epidemic", type="l", ylim=c(0,100))
+lines(seq(1:364), prediction*100, lty=2, col="purple")
+lines(day, event.level3.TVI, col="forestgreen", lwd=2, type="b")
+legend("topright", legend=c("VE", "TVI", "Prediction"), col=c("black", "forestgreen", "purple"), lwd=2, lty=c(1,1,2,2,2),bty="n")
+dev.off()
+```
+
+###---Generate Figure 4: Risk-Correlate Model
+```{r}
+#This generates an example Panel C from Figure 4. To create other panels, run the accompanying Julia file and change as directed.
+
+#Read File
+Scenario=read.csv("~/Desktop/Example-RiskCorrelate-1.csv") #Read In File, May Need to Change File Path
+Scenario2=read.csv("~/Desktop/Example-RiskCorrelate-2.csv")
+
+
+#Parameters
+spread=1
+mindays=14 
+minevents=100 
+D=365 
+an=Scenario3=Scenario
+
+##---------------------------------------------First: Reorganize Data
+an$vac_status2=an$original_infectors=NULL
+x1=subset(an,vac_status==0)
+x1$time1=1; x1$time2=x1$infected_time+0.5; x1$event=x1$ever_infected; x1$vac=0
+if( length(which(an$vac_status==1&an$vac_time>1))>=1){
+x2=subset(an,vac_status==1&vac_time>1)
+x2$time1=1; x2$time2=x2$vac_time; x2$event=0; x2$vac=0
+}
+x3=subset(an,vac_status==1)
+x3$time1=x3$vac_time; x3$time2=x3$infected_time+0.5; x3$event=x3$ever_infected; x3$vac=1
+if(length(which(an$vac_status==1&an$vac_time>1))>=1){
+x=rbind(x1,x2,x3)}else{x=rbind(x1,x3)}
+x=x[order(x$id,x$time1),]
+x$time3=1; x$time4=x$time2-x$time1+1
+x$vac_status=x$ever_infected=x$infected_time=x$vac_time=NULL #x is dataset rearranged to work with coxph
+
+##---------------------------------------------Second: Make Bins and Solve For the Level 3 SR Method
+fit=coxph(Surv(time1,time2,event)~vac,x)
+zph=cox.zph(fit,'identity')
+ut=c(unique(zph$x),Inf); LL=ut[1]; i=1; j=length(ut); mind=mindays; minn=minevents
+while(TRUE){
+ if(ut[j]-ut[i]<mind|sum(ut[i]<=zph$x)<minn){LL[length(LL)]=Inf; break}
+ for(newi in i:j) if(ut[newi]-ut[i]>=mind&sum(ut[i]<=zph$x&zph$x<ut[newi])>=minn) break
+ i=newi; LL=c(LL,ut[newi])
+}
+bins=cut(zph$x,LL,FALSE,right=FALSE); nbins=length(LL)-1
+day<-tapply(zph$x,bins,mean); event.level3.SR<-(1-exp(tapply(zph$y,bins,mean)))*100
+
+
+##---------------------------------------------Third: Solve For Level 3 TVI Method
+ru=residuals(fit,'schoenfeld') #unscaled schoenfeld residuals
+tk=as.numeric(names(ru)); Bm=coef(fit); rh=exp(Bm); V=(ru>0)+0 #tk is infection times, V indicates whether infected was vaccinated (0=unvaccinated, 1=vaccinated)
+Z=sapply(unique(rank(tk,ties.method='min')),function(i) optimize(function(Z) (V[i]-exp(Bm)*Z/(exp(Bm)*Z+1-Z) - ru[i])^2 ,c(0,1),tol=1e-15)$min )
+Z=Z[as.numeric(factor(tk))]
+y=survSplit(Surv(time1,time2,event)~.,x,cut=tapply(zph$x,bins,max)[-nbins],zero=1,episode='tcat') 
+vzm=sapply(1:nbins,function(i) coxph(Surv(time1,time2,event)~vac,subset(y,tcat==i))$coef[[1]] ) 
+fit2=coxph(Surv(time1,time2,event)~vac:factor(tcat),y)
+TVI<-exp(coef(fit2))#hazard ratio estimates using time vaccine interaction term
+bins=as.numeric(factor(bins))
+
+event.level3.TVI<-(1-TVI)*100
+
+##---------------------------------------------Fourth: Create Original Lines 
+originalVE=rep( mean(Scenario$RRVE),365)*100 #Just in caase original mean was slightly off 50%, e.g. 49.99469%
+
+
+##---------------------------------------------Fifth: Plot
+
+
+pdf(file = "~/Desktop/ExampleFigure4C.pdf", width = 6, height =4.75 ) 
+par(mfrow=c(1,1))
+
+plot(seq(1:365),(1-Scenario2$DailyVE)*100, lwd=2, type="l",   main="", ylab="VE %", xlab="Day of Epidemic", ylim=c(50,100), cex.lab=1.4, cex.main=1.5, cex.axis=1.4,)
+lines(seq(1:365), rep(((1-Scenario2$DailyVE)*100)[365], 365), lty=2, col="black")
+lines(seq(1:365), rep(mean(event.level3.TVI[22:26]), 365), lty=2, col="forestgreen")
+lines(day, event.level3.TVI, col="forestgreen", lwd=2, type="b")
+legend("topright", legend=c("VE", "mVE (TVI)"), col=c("black", "forestgreen"), lwd=2, lty=c(1,1,1,2,2),bty="n")
+
+dev.off()
+
+```
+
+
+##--Generate Figure 5:
+```{r}
+Scenario=read.csv("~/Desktop/WithinHost-1.csv") #Read In File, May Need to Change File Path
+Scenario2=read.csv("~/Desktop/WithinHost-2.csv")
+
+
+#Parameters
+spread=1
+mindays=14 
+minevents=100 
+D=365 
+an=Scenario3=Scenario
+
+##---------------------------------------------First: Reorganize Data
+an$vac_status2=an$original_infectors=NULL
+x1=subset(an,vac_status==0)
+x1$time1=1; x1$time2=x1$infected_time+0.5; x1$event=x1$ever_infected; x1$vac=0
+if( length(which(an$vac_status==1&an$vac_time>1))>=1){
+x2=subset(an,vac_status==1&vac_time>1)
+x2$time1=1; x2$time2=x2$vac_time; x2$event=0; x2$vac=0
+}
+x3=subset(an,vac_status==1)
+x3$time1=x3$vac_time; x3$time2=x3$infected_time+0.5; x3$event=x3$ever_infected; x3$vac=1
+if(length(which(an$vac_status==1&an$vac_time>1))>=1){
+x=rbind(x1,x2,x3)}else{x=rbind(x1,x3)}
+x=x[order(x$id,x$time1),]
+x$time3=1; x$time4=x$time2-x$time1+1
+x$vac_status=x$ever_infected=x$infected_time=x$vac_time=NULL #x is dataset rearranged to work with coxph
+
+##---------------------------------------------Second: Make Bins and Solve For the Level 3 SR Method
+fit=coxph(Surv(time1,time2,event)~vac,x)
+zph=cox.zph(fit,'identity')
+ut=c(unique(zph$x),Inf); LL=ut[1]; i=1; j=length(ut); mind=mindays; minn=minevents
+while(TRUE){
+ if(ut[j]-ut[i]<mind|sum(ut[i]<=zph$x)<minn){LL[length(LL)]=Inf; break}
+ for(newi in i:j) if(ut[newi]-ut[i]>=mind&sum(ut[i]<=zph$x&zph$x<ut[newi])>=minn) break
+ i=newi; LL=c(LL,ut[newi])
+}
+bins=cut(zph$x,LL,FALSE,right=FALSE); nbins=length(LL)-1
+day<-tapply(zph$x,bins,mean); event.level3.SR<-(1-exp(tapply(zph$y,bins,mean)))*100
+
+
+##---------------------------------------------Third: Solve For Level 3 TVI Method
+ru=residuals(fit,'schoenfeld') #unscaled schoenfeld residuals
+tk=as.numeric(names(ru)); Bm=coef(fit); rh=exp(Bm); V=(ru>0)+0 #tk is infection times, V indicates whether infected was vaccinated (0=unvaccinated, 1=vaccinated)
+Z=sapply(unique(rank(tk,ties.method='min')),function(i) optimize(function(Z) (V[i]-exp(Bm)*Z/(exp(Bm)*Z+1-Z) - ru[i])^2 ,c(0,1),tol=1e-15)$min )
+Z=Z[as.numeric(factor(tk))]
+y=survSplit(Surv(time1,time2,event)~.,x,cut=tapply(zph$x,bins,max)[-nbins],zero=1,episode='tcat') 
+vzm=sapply(1:nbins,function(i) coxph(Surv(time1,time2,event)~vac,subset(y,tcat==i))$coef[[1]] ) 
+fit2=coxph(Surv(time1,time2,event)~vac:factor(tcat),y)
+TVI<-exp(coef(fit2))#hazard ratio estimates using time vaccine interaction term
+bins=as.numeric(factor(bins))
+event.level3.TVI<-(1-TVI)*100
+
+##---------------------------------------------Fourth: Create Original Lines 
+originalVE=rep( mean(Scenario$RRVE),365)*100
+
+
+##---------------------------------------------Fifth: Plot
+
+
+pdf(file = "~/Desktop/ExampleFigure5C.pdf", width = 6, height =4.75 ) 
+par(mfrow=c(1,1))
+
+plot(seq(1:365),(1-Scenario2$DailyVE)*100, lwd=2, type="l",   main="", ylab="VE %", xlab="Day of Epidemic", ylim=c(0,100), cex.lab=1.4, cex.main=1.5, cex.axis=1.4,)
+lines(seq(1:365), rep(((1-Scenario2$DailyVE)*100)[365], 365), lty=2, col="black")
+lines(seq(1:365), rep(mean(event.level3.TVI[22:26]), 365), lty=2, col="forestgreen")
+lines(day, event.level3.TVI, col="forestgreen", lwd=2, type="b")
+legend("topright", legend=c("VE", "mVE (TVI)"), col=c("black", "forestgreen"), lwd=2, lty=c(1,1,1,2,2),bty="n")
+
+dev.off()
+
+```
+
